@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vibecoding Review"
+  short_description: "Independent multi-lens review of AI-written code"
+  default_prompt: "Use $vibecoding-review to run a read-only multi-lens review of this task's changes, including user-need coverage, operational risk, and an evidence-based assessment of whether repeated code or validation is justified, redundant, or unclear."
