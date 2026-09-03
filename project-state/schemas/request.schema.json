@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/project-state/request.schema.json",
+  "title": "Project State Hook Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "type", "nonce"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "type": {"enum": ["enable", "confirm-enable", "disable", "status", "validate", "repair", "patch", "no-change"]},
+    "nonce": {"type": "string", "minLength": 16, "maxLength": 128},
+    "base_revision": {"type": "integer", "minimum": 0},
+    "project_state": {"type": "object"},
+    "current_work": {"type": "object"},
+    "event": {"type": "object"},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "preview_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

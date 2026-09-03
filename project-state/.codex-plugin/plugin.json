@@ -1,0 +1,22 @@
+{
+  "name": "project-state",
+  "version": "0.1.0",
+  "description": "Keep compact, validated project state current across fresh Codex sessions.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Project State",
+    "shortDescription": "Stay grounded across fresh Codex sessions.",
+    "longDescription": "Project State maintains compact project and current-work snapshots for explicitly enabled Git worktrees, then reloads them when a fresh Codex session starts.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": ["Automation", "Write"],
+    "defaultPrompt": [
+      "$project-state enable",
+      "$project-state status",
+      "$project-state repair"
+    ]
+  }
+}

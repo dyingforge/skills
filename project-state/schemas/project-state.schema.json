@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/project-state/project-state.schema.json",
+  "title": "Project State Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "revision", "generation_id", "updated_at", "worktree",
+    "workspace_fingerprint", "goal", "success_criteria", "constraints", "phase",
+    "completed", "implementation", "decisions", "open_items", "next_action", "verification"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "revision": {"type": "integer", "minimum": 0},
+    "generation_id": {"type": ["string", "null"]},
+    "updated_at": {"type": "string"},
+    "worktree": {"type": "object"},
+    "workspace_fingerprint": {"type": "object"},
+    "goal": {"$ref": "#/$defs/entry"},
+    "success_criteria": {"$ref": "#/$defs/entries"},
+    "constraints": {"$ref": "#/$defs/entries"},
+    "phase": {"type": "string", "maxLength": 200},
+    "completed": {"$ref": "#/$defs/entries"},
+    "implementation": {"$ref": "#/$defs/entries"},
+    "decisions": {"$ref": "#/$defs/entries"},
+    "open_items": {"$ref": "#/$defs/entries"},
+    "next_action": {"$ref": "#/$defs/entry"},
+    "verification": {"$ref": "#/$defs/entries"}
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "source": {"enum": ["confirmed", "verified", "inferred", "unknown"]},
+        "text": {"type": "string", "maxLength": 8192},
+        "summary": {"type": "string", "maxLength": 8192},
+        "evidence": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/evidence"}}
+      },
+      "anyOf": [{"required": ["text"]}, {"required": ["summary"]}]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref"],
+      "properties": {
+        "kind": {"type": "string", "maxLength": 100},
+        "ref": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "summary": {"type": "string", "maxLength": 1000},
+        "status": {"type": "string", "maxLength": 100}
+      }
+    },
+    "entries": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/entry"}}
+  }
+}

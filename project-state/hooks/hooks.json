@@ -1,0 +1,52 @@
+{
+  "description": "Maintain compact project state for explicitly enabled worktrees.",
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup|resume|clear|compact",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"$PLUGIN_ROOT/hooks/project_state_hook.py\"",
+        "commandWindows": "py -3 \"%PLUGIN_ROOT%\\hooks\\project_state_hook.py\"",
+        "timeout": 10,
+        "statusMessage": "Loading project state",
+        "additionalContextLimit": 1800
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"$PLUGIN_ROOT/hooks/project_state_hook.py\"",
+        "commandWindows": "py -3 \"%PLUGIN_ROOT%\\hooks\\project_state_hook.py\"",
+        "timeout": 10,
+        "statusMessage": "Preparing project-state checkpoint",
+        "additionalContextLimit": 1200
+      }]
+    }],
+    "PostToolUse": [{
+      "matcher": "Bash|apply_patch|Edit|Write",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"$PLUGIN_ROOT/hooks/project_state_hook.py\"",
+        "commandWindows": "py -3 \"%PLUGIN_ROOT%\\hooks\\project_state_hook.py\"",
+        "timeout": 5
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"$PLUGIN_ROOT/hooks/project_state_hook.py\"",
+        "commandWindows": "py -3 \"%PLUGIN_ROOT%\\hooks\\project_state_hook.py\"",
+        "timeout": 20,
+        "statusMessage": "Verifying project-state checkpoint"
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"$PLUGIN_ROOT/hooks/project_state_hook.py\"",
+        "commandWindows": "py -3 \"%PLUGIN_ROOT%\\hooks\\project_state_hook.py\"",
+        "timeout": 3
+      }]
+    }]
+  }
+}
