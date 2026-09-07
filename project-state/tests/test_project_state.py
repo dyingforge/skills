@@ -20,10 +20,13 @@ from project_state_core import (  # noqa: E402
     atomic_write_json,
     checkpoint_for_prompt,
     current_generation,
+    estimate_next_input_tokens,
     load_activation,
+    load_signed,
     load_recovery_context,
     materialize_projection,
     parse_control_prompt,
+    process_request,
     process_stop_event,
     resolve_git_context,
     save_signed,
@@ -434,6 +437,160 @@ class ProjectStateTests(unittest.TestCase):
         save_signed(self.fx.data, store / "CURRENT.json", pointer)
         with self.assertRaises(StateError):
             current_generation(self.fx.data, store)
+
+    def test_context_estimate_uses_transcript_baseline_and_threshold(self) -> None:
+        transcript = self.fx.base / "transcript.jsonl"
+        transcript.write_bytes(b"x" * 30)
+        event = self.fx.event("Stop", transcript_path=str(transcript))
+        with mock.patch("project_state_core.HANDOFF_THRESHOLD_TOKENS", 10), mock.patch(
+            "project_state_core.HANDOFF_HIDDEN_RESERVE_TOKENS", 0
+        ), mock.patch("project_state_core.HANDOFF_OUTPUT_RESERVE_TOKENS", 0):
+            estimate = estimate_next_input_tokens(self.fx.data, self.fx.ctx, event)
+        self.assertTrue(estimate["threshold_crossed"])
+        self.assertEqual(estimate["estimated_next_input_tokens"], 10)
+        transcript.write_bytes(b"x" * 27)
+        with mock.patch("project_state_core.HANDOFF_THRESHOLD_TOKENS", 10), mock.patch(
+            "project_state_core.HANDOFF_HIDDEN_RESERVE_TOKENS", 0
+        ), mock.patch("project_state_core.HANDOFF_OUTPUT_RESERVE_TOKENS", 0):
+            below = estimate_next_input_tokens(self.fx.data, self.fx.ctx, event)
+        self.assertFalse(below["threshold_crossed"])
+
+    def test_handoff_is_requested_once_and_completed_on_clear(self) -> None:
+        self.fx.enable()
+        store = worktree_store(self.fx.data, self.fx.ctx)
+        pointer, _ = current_generation(self.fx.data, store)
+        transcript = self.fx.base / "transcript.jsonl"
+        transcript.write_bytes(b"x" * 30)
+        prompt = self.fx.event("UserPromptSubmit", session="session-2", turn="handoff", prompt="Inspect")
+        checkpoint, _ = checkpoint_for_prompt(self.fx.data, self.fx.ctx, prompt)
+        self.fx.write_request(checkpoint, {
+            "schema_version": 1, "type": "no-change", "nonce": checkpoint["nonce"],
+            "base_revision": pointer["revision"], "reason": "No semantic changes",
+        })
+        with mock.patch("project_state_core.HANDOFF_THRESHOLD_TOKENS", 10), mock.patch(
+            "project_state_core.HANDOFF_HIDDEN_RESERVE_TOKENS", 0
+        ), mock.patch("project_state_core.HANDOFF_OUTPUT_RESERVE_TOKENS", 0):
+            first = process_stop_event(
+                self.fx.data, self.fx.ctx,
+                self.fx.event("Stop", session="session-2", turn="handoff", transcript_path=str(transcript)),
+            )
+        self.assertEqual(first["decision"], "block")
+        handoff = load_signed(self.fx.data, store / "handoff.json")
+        self.assertEqual(handoff["state"], "reset-requested")
+        self.assertIsNone(process_stop_event(
+            self.fx.data, self.fx.ctx,
+            self.fx.event("Stop", session="session-2", turn="handoff", stop_hook_active=True),
+        ))
+        context = load_recovery_context(
+            self.fx.data, self.fx.ctx,
+            self.fx.event("SessionStart", session="session-2", turn="after-clear", source="clear", transcript_path=str(transcript)),
+        )
+        self.assertIn("HANDOFF RECOVERED", context)
+        self.assertEqual(load_signed(self.fx.data, store / "handoff.json")["state"], "completed")
+
+    def test_missing_transcript_disables_automatic_handoff(self) -> None:
+        estimate = estimate_next_input_tokens(self.fx.data, self.fx.ctx, self.fx.event("Stop"))
+        self.assertFalse(estimate["available"])
+        self.assertIn("transcript_path", estimate["reason"])
+
+    def test_committed_patch_is_idempotently_acknowledged_after_crash(self) -> None:
+        self.fx.enable()
+        store = worktree_store(self.fx.data, self.fx.ctx)
+        pointer, generation = current_generation(self.fx.data, store)
+        event = self.fx.event("UserPromptSubmit", session="session-2", turn="crash", prompt="Start work")
+        checkpoint, _ = checkpoint_for_prompt(self.fx.data, self.fx.ctx, event)
+        current = copy.deepcopy(generation["current_work"])
+        current["lifecycle"] = "active"
+        request = {
+            "schema_version": 1, "type": "patch", "nonce": checkpoint["nonce"],
+            "base_revision": pointer["revision"], "current_work": current,
+            "event": {"summary": "Started work"},
+        }
+        self.fx.write_request(checkpoint, request)
+        process_request(self.fx.data, self.fx.ctx, checkpoint, request)
+        recovered = process_stop_event(
+            self.fx.data, self.fx.ctx,
+            self.fx.event("Stop", session="session-2", turn="crash"),
+        )
+        self.assertIn("already committed", recovered["systemMessage"].lower())
+        new_pointer, _ = current_generation(self.fx.data, store)
+        self.assertEqual(new_pointer["revision"], pointer["revision"] + 1)
+
+    def test_same_branch_fast_forward_allows_normal_patch(self) -> None:
+        self.fx.enable()
+        store = worktree_store(self.fx.data, self.fx.ctx)
+        old_pointer, generation = current_generation(self.fx.data, store)
+        (self.fx.repo / "app.txt").write_text("two\n")
+        run_git(self.fx.repo, "add", "app.txt")
+        run_git(self.fx.repo, "commit", "-qm", "advance")
+        advanced = resolve_git_context(self.fx.repo)
+        event = self.fx.event("UserPromptSubmit", session="session-2", turn="advance", prompt="Record commit")
+        checkpoint, _ = checkpoint_for_prompt(self.fx.data, advanced, event)
+        current = copy.deepcopy(generation["current_work"])
+        current["lifecycle"] = "active"
+        self.fx.write_request(checkpoint, {
+            "schema_version": 1, "type": "patch", "nonce": checkpoint["nonce"],
+            "base_revision": old_pointer["revision"], "current_work": current,
+            "event": {"summary": "Recorded fast-forward commit"},
+        })
+        result = process_stop_event(
+            self.fx.data, advanced,
+            self.fx.event("Stop", session="session-2", turn="advance"),
+        )
+        self.assertIn("committed", result["systemMessage"].lower())
+        pointer, _ = current_generation(self.fx.data, store)
+        self.assertEqual(pointer["worktree_binding"]["head"], advanced.head)
+
+    def test_repair_rebuilds_root_when_no_valid_generation_chain_exists(self) -> None:
+        self.fx.enable()
+        store = worktree_store(self.fx.data, self.fx.ctx)
+        pointer, generation = current_generation(self.fx.data, store)
+        project = copy.deepcopy(generation["project_state"])
+        current = copy.deepcopy(generation["current_work"])
+        generation["parent_generation_id"] = "missing-parent"
+        body = {key: value for key, value in generation.items() if key != "payload_hash"}
+        generation["payload_hash"] = sha256_json(body)
+        save_signed(self.fx.data, store / "generations" / f"{pointer['generation_id']}.json", generation)
+        pointer["manifest_hash"] = sha256_json(generation)
+        save_signed(self.fx.data, store / "CURRENT.json", pointer)
+
+        repair_event = self.fx.event("UserPromptSubmit", session="session-2", turn="repair-root", prompt="$project-state repair")
+        checkpoint, _ = checkpoint_for_prompt(self.fx.data, self.fx.ctx, repair_event)
+        self.fx.write_request(checkpoint, {
+            "schema_version": 1, "type": "repair", "nonce": checkpoint["nonce"],
+            "project_state": project, "current_work": current,
+        })
+        result = process_stop_event(
+            self.fx.data, self.fx.ctx,
+            self.fx.event("Stop", session="session-2", turn="repair-root"),
+        )
+        self.assertIn("repair committed", result["systemMessage"].lower())
+        repaired_pointer, repaired = current_generation(self.fx.data, store)
+        self.assertIsNone(repaired_pointer["parent_generation_id"])
+        self.assertIsNotNone(repaired.get("repair"))
+        self.assertTrue(any((store / "repair-archives").iterdir()))
+
+    def test_repair_can_start_with_corrupt_pointer(self) -> None:
+        self.fx.enable()
+        store = worktree_store(self.fx.data, self.fx.ctx)
+        _, generation = current_generation(self.fx.data, store)
+        project = copy.deepcopy(generation["project_state"])
+        current = copy.deepcopy(generation["current_work"])
+        (store / "CURRENT.json").write_text("{}\n")
+        repair_event = self.fx.event("UserPromptSubmit", session="session-2", turn="repair-pointer", prompt="$project-state repair")
+        checkpoint, instructions = checkpoint_for_prompt(self.fx.data, self.fx.ctx, repair_event)
+        self.assertIn("repair", instructions)
+        self.fx.write_request(checkpoint, {
+            "schema_version": 1, "type": "repair", "nonce": checkpoint["nonce"],
+            "project_state": project, "current_work": current,
+        })
+        result = process_stop_event(
+            self.fx.data, self.fx.ctx,
+            self.fx.event("Stop", session="session-2", turn="repair-pointer"),
+        )
+        self.assertIn("repair committed", result["systemMessage"].lower())
+        pointer, _ = current_generation(self.fx.data, store)
+        self.assertIsNotNone(pointer)
 
 
 if __name__ == "__main__":

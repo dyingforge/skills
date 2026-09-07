@@ -50,6 +50,7 @@ For `no-change`, omit snapshots and provide `type`, `nonce`, `base_revision`, an
 
 ## Recover or stop safely
 
+- If lifecycle context contains `PROJECT_STATE_HANDOFF`, the checkpoint is already committed. Invoke a supplied same-task new-context capability immediately and do not compact. If no such capability is available, tell the user that state is safely saved and ask them to clear the context; if their client cannot clear in place, ask them to start a fresh task.
 - If lifecycle context says state is stale, repair or ask for the missing goal-level decision before continuing substantive work.
 - If a request is rejected, fix the stated schema, nonce, revision, safety, or fingerprint problem. Do not bypass the Hook or edit plugin-private data.
 - If projection reconciliation is manual on the active platform/filesystem, preserve both versions and ask the user which state is authoritative.

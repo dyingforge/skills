@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -27,7 +28,7 @@ except ImportError:  # pragma: no cover - exercised on Windows
 
 
 SCHEMA_VERSION = 1
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 STATE_DIR_NAME = ".project-state"
 REQUEST_DIR_NAME = ".requests"
 MAX_REQUEST_BYTES = 128 * 1024
@@ -39,6 +40,9 @@ EVENT_ROTATIONS = 3
 FINGERPRINT_TOTAL_BYTES = 2 * 1024 * 1024
 FINGERPRINT_FILE_BYTES = 256 * 1024
 FINGERPRINT_SECONDS = 1.0
+HANDOFF_THRESHOLD_TOKENS = 120_000
+HANDOFF_HIDDEN_RESERVE_TOKENS = 8_000
+HANDOFF_OUTPUT_RESERVE_TOKENS = 4_096
 PLUGIN_ROOT_PATH = Path(__file__).parents[1]
 
 CONTROL_OPERATIONS = {
@@ -121,6 +125,18 @@ def _git(cwd: Path, *args: str, check: bool = True) -> bytes:
         message = result.stderr.decode("utf-8", "replace").strip()
         raise StateError(message or f"git {' '.join(args)} failed")
     return result.stdout
+
+
+def _git_succeeds(cwd: Path, *args: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def _resolve_git_path(root: Path, raw: bytes) -> Path:
@@ -451,7 +467,14 @@ def checkpoint_for_prompt(
     if req_dir.resolve(strict=True).parent != state_dir(ctx).resolve(strict=True):
         raise StateError("project-state request spool escaped the state directory")
     req_path = req_dir / f"{nonce}.json"
-    pointer = load_pointer(plugin_data, store)
+    pointer_error: Optional[str] = None
+    try:
+        pointer = load_pointer(plugin_data, store)
+    except (StateError, OSError, ValueError, json.JSONDecodeError) as exc:
+        if operation not in {"repair", "status", "validate"}:
+            raise
+        pointer = None
+        pointer_error = str(exc)
     revision = pointer.get("revision", 0) if pointer else 0
     record = {
         "state": "pending",
@@ -466,6 +489,8 @@ def checkpoint_for_prompt(
         "permission_mode": event.get("permission_mode"),
         "created_at": utc_now(),
     }
+    if pointer_error:
+        record["pointer_error"] = pointer_error[:1000]
     if operation == "confirm-enable" and activation.get("preview_hash"):
         record["expected_preview_hash"] = activation["preview_hash"]
     save_signed(plugin_data, checkpoint_path(store, session_id, turn_id), record)
@@ -718,6 +743,92 @@ def current_generation(plugin_data: Union[str, Path], store: Path) -> Tuple[Opti
     return pointer, generation
 
 
+def _binding_allows_current_head(ctx: GitContext, binding: dict[str, Any]) -> bool:
+    if binding.get("identity") != ctx.identity or binding.get("ref_name") != ctx.ref_name:
+        return False
+    old_kind = binding.get("ref_kind")
+    old_head = binding.get("head")
+    if old_kind == ctx.ref_kind and old_head == ctx.head:
+        return True
+    if old_kind == "unborn" and ctx.ref_kind == "branch" and old_head is None and ctx.head:
+        return True
+    if old_kind != "branch" or ctx.ref_kind != "branch" or not old_head or not ctx.head:
+        return False
+    return _git_succeeds(ctx.root, "merge-base", "--is-ancestor", str(old_head), str(ctx.head))
+
+
+def _pointer_for_generation(generation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "generation_id": generation["generation_id"],
+        "parent_generation_id": generation.get("parent_generation_id"),
+        "revision": generation["revision"],
+        "manifest_hash": _manifest_pointer_hash(generation),
+        "worktree_binding": generation["worktree_binding"],
+        "committed_at": utc_now(),
+    }
+
+
+def salvage_repair_base(
+    plugin_data: Union[str, Path], store: Path
+) -> Tuple[Optional[dict[str, Any]], Optional[dict[str, Any]], dict[str, Any]]:
+    """Archive a broken pointer and select the newest generation with a valid root chain."""
+    archive = store / "repair-archives" / f"{int(time.time())}-{uuid.uuid4().hex}"
+    archive.mkdir(parents=True, exist_ok=False, mode=0o700)
+    current_path = pointer_path(store)
+    if current_path.exists() and not current_path.is_symlink():
+        shutil.copy2(current_path, archive / "CURRENT.json")
+
+    valid: dict[str, dict[str, Any]] = {}
+    invalid: list[str] = []
+    generations = generation_dir(store)
+    for candidate in generations.glob("*.json"):
+        try:
+            generation = load_generation(plugin_data, store, candidate.stem)
+            valid[candidate.stem] = generation
+        except Exception as exc:
+            invalid.append(f"{candidate.name}: {exc}")
+
+    chain_state: dict[str, bool] = {}
+
+    def has_valid_root(generation_id: str, visiting: set[str]) -> bool:
+        if generation_id in chain_state:
+            return chain_state[generation_id]
+        if generation_id in visiting or generation_id not in valid:
+            chain_state[generation_id] = False
+            return False
+        generation = valid[generation_id]
+        parent = generation.get("parent_generation_id")
+        ok = parent is None or has_valid_root(str(parent), visiting | {generation_id})
+        chain_state[generation_id] = ok
+        return ok
+
+    candidates = [
+        generation for generation_id, generation in valid.items()
+        if has_valid_root(generation_id, set())
+    ]
+    selected = max(candidates, key=lambda value: int(value.get("revision", 0)), default=None)
+    metadata = {
+        "archive": str(archive.relative_to(store)),
+        "invalid_records": invalid[:100],
+        "selected_generation_id": selected.get("generation_id") if selected else None,
+        "recovered_at": utc_now(),
+    }
+    save_signed(plugin_data, archive / "recovery.json", metadata)
+
+    if selected is not None:
+        pointer = _pointer_for_generation(selected)
+        save_signed(plugin_data, current_path, pointer)
+        return pointer, selected, metadata
+
+    if generations.exists():
+        destination = archive / "generations"
+        os.replace(generations, destination)
+        _fsync_dir(archive)
+    current_path.unlink(missing_ok=True)
+    generation_dir(store)
+    return None, None, metadata
+
+
 def _manifest_pointer_hash(generation: dict[str, Any]) -> str:
     return sha256_json(generation)
 
@@ -885,12 +996,7 @@ def recover_committed_generation(
 ) -> dict[str, Any]:
     """Idempotently roll forward artifacts after the commit pointer is durable."""
     binding = pointer.get("worktree_binding", {})
-    if any((
-        binding.get("identity") != ctx.identity,
-        binding.get("ref_kind") != ctx.ref_kind,
-        binding.get("head") != ctx.head,
-        binding.get("ref_name") != ctx.ref_name,
-    )):
+    if not _binding_allows_current_head(ctx, binding):
         raise StateError("committed generation belongs to a different Git ref or HEAD")
     store = worktree_store(plugin_data, ctx)
     with transaction_lock(store):
@@ -929,6 +1035,8 @@ def commit_generation(
     *,
     reset_parent: bool = False,
     accepted_projection_hashes: Optional[dict[str, Optional[str]]] = None,
+    commit_request: Optional[dict[str, Any]] = None,
+    repair_metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     store = worktree_store(plugin_data, ctx)
     with transaction_lock(store):
@@ -990,6 +1098,10 @@ def commit_generation(
                 "current_work": _projection_hash(state_dir(ctx) / "current-work.json"),
             },
         }
+        if commit_request is not None:
+            manifest_body["commit_request"] = commit_request
+        if repair_metadata is not None:
+            manifest_body["repair"] = repair_metadata
         manifest = dict(manifest_body)
         manifest["payload_hash"] = sha256_json(manifest_body)
         generation_path = generation_dir(store) / f"{generation_id}.json"
@@ -1034,6 +1146,7 @@ def initialize_generation(
     ctx: GitContext,
     project_state: Optional[dict[str, Any]] = None,
     current_work: Optional[dict[str, Any]] = None,
+    commit_request: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     store = worktree_store(plugin_data, ctx)
     pointer = load_pointer(plugin_data, store)
@@ -1045,6 +1158,7 @@ def initialize_generation(
         project_state or default_project_state(ctx),
         current_work or default_current_work(ctx),
         "Project State enabled",
+        commit_request=commit_request,
     )
     pointer = load_pointer(plugin_data, store)
     assert pointer is not None
@@ -1093,6 +1207,48 @@ def validate_request_shape(request: dict[str, Any]) -> None:
             raise StateError("patch event.summary must be 1 to 1000 characters")
 
 
+def _commit_request_metadata(checkpoint: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "nonce": checkpoint["nonce"],
+        "checkpoint_id": sha256_bytes(
+            f"{checkpoint.get('session_id', '')}\0{checkpoint.get('turn_id', '')}".encode()
+        ),
+        "operation": request.get("type"),
+        "request_hash": sha256_json(request),
+    }
+
+
+def recover_committed_request(
+    plugin_data: Union[str, Path],
+    ctx: GitContext,
+    checkpoint: dict[str, Any],
+    request: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    if request.get("type") not in {"patch", "repair"}:
+        return None
+    store = worktree_store(plugin_data, ctx)
+    try:
+        pointer, generation = current_generation(plugin_data, store)
+    except Exception:
+        if request.get("type") == "repair":
+            return None
+        raise
+    if pointer is None or generation is None:
+        return None
+    committed = generation.get("commit_request")
+    if not isinstance(committed, dict) or committed.get("nonce") != checkpoint.get("nonce"):
+        return None
+    if committed.get("request_hash") != sha256_json(request):
+        raise StateError("checkpoint nonce was already committed with a different request payload")
+    health = recover_committed_generation(plugin_data, ctx, pointer, generation)
+    return {
+        "message": "Recovered an already committed project-state checkpoint.",
+        "health": health,
+        "revision": pointer["revision"],
+        "replayed": True,
+    }
+
+
 def process_request(
     plugin_data: Union[str, Path],
     ctx: GitContext,
@@ -1121,7 +1277,10 @@ def process_request(
         if supplied_project is not None:
             validate_snapshot(supplied_project, "project")
             validate_snapshot(supplied_current, "current")
-        initialize_generation(plugin_data, ctx, supplied_project, supplied_current)
+        initialize_generation(
+            plugin_data, ctx, supplied_project, supplied_current,
+            commit_request=_commit_request_metadata(checkpoint, request),
+        )
         pointer, generation = current_generation(plugin_data, store)
         assert pointer is not None and generation is not None
         preview_hash = sha256_json({
@@ -1189,14 +1348,15 @@ def process_request(
         if supplied_project is not None:
             validate_snapshot(supplied_project, "project")
             validate_snapshot(supplied_current, "current")
-            old_pointer, old_generation = current_generation(plugin_data, store)
+            recovery_metadata: Optional[dict[str, Any]] = None
+            try:
+                old_pointer, old_generation = current_generation(plugin_data, store)
+            except Exception as exc:
+                old_pointer, old_generation, recovery_metadata = salvage_repair_base(plugin_data, store)
+                recovery_metadata = dict(recovery_metadata)
+                recovery_metadata["trigger_error"] = str(exc)[:1000]
             binding = old_pointer.get("worktree_binding", {}) if old_pointer else {}
-            reset_parent = bool(old_pointer) and (
-                binding.get("identity") != ctx.identity
-                or binding.get("ref_kind") != ctx.ref_kind
-                or binding.get("head") != ctx.head
-                or binding.get("ref_name") != ctx.ref_name
-            )
+            reset_parent = bool(old_pointer) and not _binding_allows_current_head(ctx, binding)
             if old_generation is not None and not reset_parent:
                 validate_lifecycle_transition(old_generation["current_work"], supplied_current)
             accepted = {
@@ -1211,6 +1371,8 @@ def process_request(
                 "Project State reconciled by explicit repair",
                 reset_parent=reset_parent,
                 accepted_projection_hashes=accepted,
+                commit_request=_commit_request_metadata(checkpoint, request),
+                repair_metadata=recovery_metadata,
             )
             return {"message": "Project State repair committed.", "health": repaired}
         atomic_write_json(store / "health.json", {**health, "stale": True, "stale_reason": "repair requested"})
@@ -1222,12 +1384,7 @@ def process_request(
     if pointer is None or generation is None:
         raise StateError("active project has no committed generation")
     binding = pointer.get("worktree_binding", {})
-    if any((
-        binding.get("identity") != ctx.identity,
-        binding.get("ref_kind") != ctx.ref_kind,
-        binding.get("head") != ctx.head,
-        binding.get("ref_name") != ctx.ref_name,
-    )):
+    if not _binding_allows_current_head(ctx, binding):
         raise StateError("Git ref or HEAD changed; use an explicit repair before normal checkpoints")
     if request.get("base_revision") != pointer.get("revision"):
         raise StateError("request base_revision is stale")
@@ -1247,7 +1404,10 @@ def process_request(
     if not isinstance(event, dict) or not isinstance(event.get("summary"), str) or not event["summary"].strip():
         raise StateError("patch request requires event.summary")
     validate_safe_content({"event_summary": event["summary"]})
-    health = commit_generation(plugin_data, ctx, project, current, event["summary"].strip())
+    health = commit_generation(
+        plugin_data, ctx, project, current, event["summary"].strip(),
+        commit_request=_commit_request_metadata(checkpoint, request),
+    )
     (store / "mutation-hint.json").unlink(missing_ok=True)
     return {"message": "Project state checkpoint committed.", "health": health}
 
@@ -1261,6 +1421,155 @@ def _entry_text(entry: Any, label: str) -> str:
     if source == "inferred":
         return f"{label}: [{identifier}] inferred; inspect the state/evidence before relying on it"
     return f"{label}: [{identifier}] ({source}) {text[:500]}"
+
+
+def _transcript_bytes(event: dict[str, Any]) -> Tuple[Optional[int], Optional[str]]:
+    raw_path = event.get("transcript_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None, "hook event has no transcript_path"
+    path = Path(raw_path)
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        return None, f"transcript is unavailable: {exc}"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None, "transcript is not a regular non-symlink file"
+    return info.st_size, None
+
+
+def _configured_handoff_limit(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+def handoff_limits() -> Tuple[int, int, int]:
+    threshold = _configured_handoff_limit(
+        "PROJECT_STATE_HANDOFF_THRESHOLD_TOKENS", HANDOFF_THRESHOLD_TOKENS,
+        minimum=16_000, maximum=2_000_000,
+    )
+    hidden_reserve = _configured_handoff_limit(
+        "PROJECT_STATE_HANDOFF_HIDDEN_RESERVE_TOKENS", HANDOFF_HIDDEN_RESERVE_TOKENS,
+        minimum=0, maximum=256_000,
+    )
+    output_reserve = _configured_handoff_limit(
+        "PROJECT_STATE_HANDOFF_OUTPUT_RESERVE_TOKENS", HANDOFF_OUTPUT_RESERVE_TOKENS,
+        minimum=0, maximum=256_000,
+    )
+    return threshold, hidden_reserve, output_reserve
+
+
+def estimate_next_input_tokens(
+    plugin_data: Union[str, Path], ctx: GitContext, event: dict[str, Any]
+) -> dict[str, Any]:
+    store = worktree_store(plugin_data, ctx)
+    threshold, hidden_reserve, output_reserve = handoff_limits()
+    transcript_size, error = _transcript_bytes(event)
+    if transcript_size is None:
+        return {
+            "available": False,
+            "algorithm": "conservative-transcript-utf8-v1",
+            "threshold_tokens": threshold,
+            "reason": error,
+        }
+    meter = load_signed(plugin_data, store / "context-meter.json") or {}
+    baseline = meter.get("baseline_transcript_bytes", 0)
+    if isinstance(baseline, bool) or not isinstance(baseline, int) or baseline < 0:
+        baseline = 0
+    visible_bytes = transcript_size - baseline if transcript_size >= baseline else transcript_size
+    visible_tokens = (visible_bytes + 2) // 3
+    estimate = visible_tokens + hidden_reserve + output_reserve
+    return {
+        "available": True,
+        "algorithm": "conservative-transcript-utf8-v1",
+        "transcript_bytes": transcript_size,
+        "baseline_transcript_bytes": baseline,
+        "visible_transcript_bytes": visible_bytes,
+        "estimated_visible_tokens": visible_tokens,
+        "hidden_reserve_tokens": hidden_reserve,
+        "output_reserve_tokens": output_reserve,
+        "estimated_next_input_tokens": estimate,
+        "threshold_tokens": threshold,
+        "threshold_crossed": estimate >= threshold,
+    }
+
+
+def reset_context_meter(
+    plugin_data: Union[str, Path], ctx: GitContext, event: dict[str, Any], reason: str
+) -> None:
+    transcript_size, error = _transcript_bytes(event)
+    if transcript_size is None:
+        return
+    store = worktree_store(plugin_data, ctx)
+    save_signed(plugin_data, store / "context-meter.json", {
+        "baseline_transcript_bytes": transcript_size,
+        "context_epoch": uuid.uuid4().hex,
+        "reason": reason,
+        "updated_at": utc_now(),
+        "transcript_error": error,
+    })
+
+
+def maybe_begin_handoff(
+    plugin_data: Union[str, Path],
+    ctx: GitContext,
+    checkpoint: dict[str, Any],
+    event: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    store = worktree_store(plugin_data, ctx)
+    existing = load_signed(plugin_data, store / "handoff.json")
+    if existing and existing.get("state") in {"checkpoint-committed", "reset-requested"}:
+        return None
+    estimate = estimate_next_input_tokens(plugin_data, ctx, event)
+    if not estimate.get("threshold_crossed"):
+        return None
+    pointer = load_pointer(plugin_data, store)
+    if pointer is None:
+        return None
+    receipt = {
+        "state": "reset-requested",
+        "handoff_id": uuid.uuid4().hex,
+        "generation_id": pointer["generation_id"],
+        "revision": pointer["revision"],
+        "checkpoint_nonce": checkpoint["nonce"],
+        "session_id": checkpoint.get("session_id"),
+        "turn_id": checkpoint.get("turn_id"),
+        "estimate": estimate,
+        "created_at": utc_now(),
+    }
+    save_signed(plugin_data, store / "handoff.json", receipt)
+    reason = (
+        "PROJECT_STATE_HANDOFF: the committed checkpoint estimates the next context at "
+        f"{estimate['estimated_next_input_tokens']} tokens (threshold {estimate['threshold_tokens']}). "
+        "If a same-task new-context capability is available, invoke it now. Do not compact. "
+        "If it is unavailable, tell the user that state is safely saved and ask them to clear "
+        "the context; if their client cannot clear in place, start a fresh task."
+    )
+    return {"decision": "block", "reason": reason, "systemMessage": "Project State checkpoint committed; context handoff requested."}
+
+
+def observe_handoff_recovery(
+    plugin_data: Union[str, Path], ctx: GitContext, event: dict[str, Any]
+) -> Optional[dict[str, Any]]:
+    store = worktree_store(plugin_data, ctx)
+    path = store / "handoff.json"
+    receipt = load_signed(plugin_data, path)
+    source = str(event.get("source", ""))
+    if receipt and receipt.get("state") == "reset-requested" and source in {"startup", "clear", "compact"}:
+        receipt["state"] = "completed"
+        receipt["recovery_source"] = source
+        receipt["recovered_at"] = utc_now()
+        save_signed(plugin_data, path, receipt)
+        reset_context_meter(plugin_data, ctx, event, f"handoff:{source}")
+        return receipt
+    if source in {"clear", "compact"}:
+        reset_context_meter(plugin_data, ctx, event, f"session-start:{source}")
+    return receipt
 
 
 def build_capsule(generation: dict[str, Any], health: Optional[dict[str, Any]] = None) -> str:
@@ -1342,6 +1651,16 @@ def status_report(plugin_data: Union[str, Path], ctx: GitContext) -> dict[str, A
             result["health"] = {"stale": True, "error": "invalid health record"}
             result["stale"] = True
     result["mutation_pending"] = (store / "mutation-hint.json").exists()
+    try:
+        handoff = load_signed(plugin_data, store / "handoff.json")
+        if handoff:
+            result["handoff"] = {
+                key: handoff.get(key)
+                for key in ("state", "handoff_id", "generation_id", "revision", "created_at", "recovered_at", "recovery_source")
+                if handoff.get(key) is not None
+            }
+    except Exception as exc:
+        result["handoff"] = {"state": "invalid", "error": str(exc)}
     checkpoints = store / "checkpoints"
     if checkpoints.exists():
         candidates = sorted(checkpoints.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -1406,16 +1725,12 @@ def load_recovery_context(plugin_data: Union[str, Path], ctx: GitContext, event:
         return "Project State enablement is confirmed but needs a genuinely fresh session before activation."
     if phase != "active":
         return None
+    handoff = observe_handoff_recovery(plugin_data, ctx, event)
     pointer, generation = current_generation(plugin_data, store)
     if pointer is None or generation is None:
         return "Project State is active but has no valid generation. Run `$project-state repair`."
     binding = pointer.get("worktree_binding", {})
-    if any((
-        binding.get("identity") != ctx.identity,
-        binding.get("ref_kind") != ctx.ref_kind,
-        binding.get("head") != ctx.head,
-        binding.get("ref_name") != ctx.ref_name,
-    )):
+    if not _binding_allows_current_head(ctx, binding):
         atomic_write_json(store / "health.json", {
             "stale": True,
             "stale_reason": "Git ref or HEAD changed; old generation was not materialized",
@@ -1434,7 +1749,10 @@ def load_recovery_context(plugin_data: Union[str, Path], ctx: GitContext, event:
     health = status_report(plugin_data, ctx)
     if health.get("stale"):
         return build_capsule(generation, {"stale": True, "stale_reason": health.get("error", "workspace fingerprint changed")})
-    return build_capsule(generation, health.get("health"))
+    capsule = build_capsule(generation, health.get("health"))
+    if handoff and handoff.get("state") == "completed" and handoff.get("generation_id") == generation.get("generation_id"):
+        capsule += f"\nHANDOFF RECOVERED: {handoff.get('handoff_id')} via {handoff.get('recovery_source', 'session start')}."
+    return capsule
 
 
 def process_stop_event(plugin_data: Union[str, Path], ctx: GitContext, event: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -1455,12 +1773,18 @@ def process_stop_event(plugin_data: Union[str, Path], ctx: GitContext, event: di
         request = _secure_read_request(req_path, ctx)
         checkpoint["state"] = "proposed"
         save_signed(plugin_data, checkpoint_file, checkpoint)
-        result = process_request(plugin_data, ctx, checkpoint, request)
+        result = recover_committed_request(plugin_data, ctx, checkpoint, request)
+        if result is None:
+            result = process_request(plugin_data, ctx, checkpoint, request)
         checkpoint["state"] = "no-change" if request.get("type") == "no-change" else "committed"
         checkpoint["result"] = result
         checkpoint["committed_at"] = utc_now()
         save_signed(plugin_data, checkpoint_file, checkpoint)
         req_path.unlink(missing_ok=True)
+        if request.get("type") in {"patch", "no-change"}:
+            handoff = maybe_begin_handoff(plugin_data, ctx, checkpoint, event)
+            if handoff:
+                return handoff
         message = result.get("message") if isinstance(result, dict) else None
         return {"systemMessage": message} if message else None
     except (FileNotFoundError, StateError, json.JSONDecodeError) as exc:
