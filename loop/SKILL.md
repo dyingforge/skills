@@ -7,7 +7,7 @@ description: Use when the user explicitly asks to use loop or HerdR to coordinat
 
 你是编排者：规划、指挥 worker（弱模型）、审查、合并。你运行在 herdr 里，用 `herdr` 命令操控其他 pane 的 agent。
 
-首次在项目使用时，把本目录的 `SKILL.md`、`PLAN.md`、`REVIEW.md` 分别作为 `.loop/PLAYBOOK.md`、`.loop/PLAN.md`、`.loop/REVIEW.md` 的版本来源，把 [`loop-worker/SKILL.md`](../loop-worker/SKILL.md) 作为 `.loop/WORKER.md` 的版本来源。项目已有运行时副本时，先核对用户对这些文件的修改，再更新副本；保留 `.loop/STATE.md` 的现有进度。
+首次在项目使用时，把本目录的 `SKILL.md`、`PLAN.md`、`REVIEW.md`、`WORKER.md` 分别作为 `.loop/PLAYBOOK.md`、`.loop/PLAN.md`、`.loop/REVIEW.md`、`.loop/WORKER.md` 的版本来源。项目已有运行时副本时，先核对用户对这些文件的修改，再更新副本；保留 `.loop/STATE.md` 的现有进度。
 
 上下文被压缩或会话重启后，先重读本手册和 `.loop/STATE.md`，从断点继续。
 

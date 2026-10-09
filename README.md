@@ -1,6 +1,6 @@
 # Codex Skills
 
-这个仓库收录了五个用于 Codex 的个人能力包：代码审查 Skill、项目治理 Skill、带生命周期 Hooks 的 Project State 插件式 Skill，以及配套的 loop 编排者与执行者 Skill。
+这个仓库收录了四个用于 Codex 的个人能力包：代码审查 Skill、项目治理 Skill、带生命周期 Hooks 的 Project State 插件式 Skill，以及 loop 编排流程 Skill。
 
 ## Skills
 
@@ -9,8 +9,7 @@
 | [`vibecoding-review`](./vibecoding-review/) | 审查当前任务中的 AI 代码改动，核对用户需求覆盖、正确性、运行风险、复杂度与测试证据 | `SKILL.md`、Codex UI 元数据 |
 | [`project-to-act`](./project-to-act/) | 为跨会话、长期项目维护目标、范围、进度、版本、功能和验收证据 | `SKILL.md`、初始化/迁移/验证脚本、五份项目账本模板、Codex UI 元数据 |
 | [`project-state`](./project-state/) | 在新的 Codex 任务之间恢复紧凑、经过验证且与 Git worktree 绑定的项目状态 | Skill、生命周期 Hooks、JSON schemas、状态引擎、测试 |
-| [`loop`](./loop/) | 使用 HerdR 规划任务、指挥执行者、独立验收并合并成果 | 编排者 `SKILL.md`、`PLAN.md`、`REVIEW.md` |
-| [`loop-worker`](./loop-worker/) | 在独立 worktree 中执行 loop 指派的单项任务并交付结果 | 执行者 `SKILL.md` |
+| [`loop`](./loop/) | 使用 HerdR 规划任务、指挥执行者、独立验收并合并成果 | 编排者 `SKILL.md`、`PLAN.md`、`REVIEW.md`，执行者 `WORKER.md` |
 
 ## 安装
 
@@ -22,7 +21,6 @@ mkdir -p ~/.codex/skills
 cp -R skills/vibecoding-review ~/.codex/skills/
 cp -R skills/project-to-act ~/.codex/skills/
 cp -R skills/loop ~/.codex/skills/
-cp -R skills/loop-worker ~/.codex/skills/
 ```
 
 重启 Codex 或开始一个新任务，使技能清单重新加载。
@@ -49,7 +47,7 @@ $project-state enable
 使用 $loop 通过 HerdR 编排这个项目的实现与验收。
 ```
 
-`loop-worker` 由 loop 编排者指派具体任务时使用。首次启用 loop 时，编排者将两份 Skill 分别作为项目 `.loop/PLAYBOOK.md` 和 `.loop/WORKER.md` 的版本来源。
+执行者手册位于 `loop/WORKER.md`。编排者指派具体任务时，把它复制为项目 `.loop/WORKER.md` 交给执行者。首次启用 loop 时，编排者将 `SKILL.md`、`PLAN.md`、`REVIEW.md`、`WORKER.md` 分别作为项目 `.loop/PLAYBOOK.md`、`.loop/PLAN.md`、`.loop/REVIEW.md`、`.loop/WORKER.md` 的版本来源。
 
 `project-to-act` 不会因为技能被加载就自动写入文件。它会先检查项目中是否已有管理文档，并在初始化、采用或迁移前执行预览和验证。
 
@@ -59,11 +57,10 @@ $project-state enable
 
 - `project-state/`：插件清单、Skill、Hooks、JSON schemas、状态引擎与测试。
 - `project-to-act/`：Skill、Codex UI 元数据、管理脚本与模板。
-- `loop/`：编排者 Skill。
-- `loop-worker/`：执行者 Skill。
+- `loop/`：编排流程 Skill，包含编排者 `SKILL.md`、计划 `PLAN.md`、审查 `REVIEW.md` 与执行者 `WORKER.md`。
 - `vibecoding-review/`：代码审查 Skill 与 Codex UI 元数据。
 
-`vibecoding-review`、`project-to-act`、`loop` 和 `loop-worker` 是可独立安装的 Skill；`project-state` 是插件根目录，其 Skill 位于 `project-state/skills/project-state/`。技能说明与触发条件位于对应的 `SKILL.md`；已有的 `agents/openai.yaml` 提供技能列表中的展示信息。
+`vibecoding-review`、`project-to-act` 和 `loop` 是可独立安装的 Skill；`project-state` 是插件根目录，其 Skill 位于 `project-state/skills/project-state/`。技能说明与触发条件位于对应的 `SKILL.md`；已有的 `agents/openai.yaml` 提供技能列表中的展示信息。
 
 ## 维护与验证
 
