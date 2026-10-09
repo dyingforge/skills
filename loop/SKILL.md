@@ -7,14 +7,14 @@ description: Use when the user explicitly asks to use loop or HerdR to coordinat
 
 你是编排者：规划、指挥 worker（弱模型）、审查、合并。你运行在 herdr 里，用 `herdr` 命令操控其他 pane 的 agent。
 
-首次在项目使用时，把本技能作为 `.loop/PLAYBOOK.md` 的版本来源，把 [`loop-worker/SKILL.md`](../loop-worker/SKILL.md) 作为 `.loop/WORKER.md` 的版本来源。项目已有运行时副本时，先核对用户对这些文件的修改，再更新副本；保留 `.loop/STATE.md` 的现有进度。
+首次在项目使用时，把本目录的 `SKILL.md`、`PLAN.md`、`REVIEW.md` 分别作为 `.loop/PLAYBOOK.md`、`.loop/PLAN.md`、`.loop/REVIEW.md` 的版本来源，把 [`loop-worker/SKILL.md`](../loop-worker/SKILL.md) 作为 `.loop/WORKER.md` 的版本来源。项目已有运行时副本时，先核对用户对这些文件的修改，再更新副本；保留 `.loop/STATE.md` 的现有进度。
 
 上下文被压缩或会话重启后，先重读本手册和 `.loop/STATE.md`，从断点继续。
 
 ## 铁律
 
 1. **不提前结束回合。** 除非全部完成，或触发第 7 节停止条件，否则一直循环，不要汇报进度后停下。
-2. **你不实现。** 写代码、改文档、构建、改配置一律交给 worker。你只做：规划、审查、合并、第 5 节规定的接管。
+2. **你不实现。** 写代码、改文档、构建、改配置一律交给 worker。你只做：规划、审查、合并、[`REVIEW.md`](REVIEW.md) 中规定的接管。
 3. **不信 worker 自述，独立验收**，每轮只验一次。
 4. **大内容走文件。** 发给 worker 的消息只写“读哪个文件、做什么”。
 5. **不确定的 herdr 命令先 `herdr <group> --help`，不要猜。**
@@ -45,29 +45,7 @@ herdr pane current; herdr agent list; git status --porcelain   # 工作区应干
 
 ## 3. 计划
 
-**plan.md 是用户亲手写的权威来源，不是草稿**：
-
-- 保留其结构、顺序、命名、技术选择、验收标准；对应章节原文放进任务文件。
-- 只做四类调整：拆小过大的步骤、补验收命令、补文件路径/上下文、纠正明显错误的依赖顺序。
-- 每个任务标“来源：plan 第 X 条”，plan 每一条都要有任务覆盖。
-- **不改 plan.md**，调整记入 STATE.md 的“计划变更”。
-- plan 有矛盾或不可行：先推进不受影响的部分并记录；整体走不下去才按第 7 节停下。
-- 每次取下一个任务前，检查 plan.md 是否被用户修改，有变化就同步任务。
-
-只有 goal.md：自己规划并拆分。
-
-任务文件 `.loop/tasks/tNN.md`：
-
-```markdown
-# tNN 标题
-来源：plan 第 X 条（或“编排者追加：原因”）
-## 目标
-## 具体做法（文件、参考、接口，让 worker 无需猜测）
-## 允许修改
-## 验收（一条能以退出码判定成败的命令）
-```
-
-**分配原则：所有实现都派给 worker。** 需要架构判断的任务，你先做出判断并写进任务文件（接口、文件划分、约束），再派。
+进入计划阶段前读取同目录 [`PLAN.md`](PLAN.md)，按其中步骤执行。
 
 ## 4. 准备 worker（一次，已存在则跳过）
 
@@ -102,38 +80,9 @@ herdr agent prompt worker1 "先读 <绝对路径>/.loop/WORKER.md，再严格执
 herdr agent wait worker1 --timeout 1800000
 ```
 
-用默认等待条件（idle/done/blocked 任一返回），不要指定 `--until done`，否则会漏掉直接回到 idle 的 worker。按返回状态处理：idle/done → 审查；blocked → 第 6 节；超时 → `agent read` 看一次，正常工作就再等，卡死见第 6 节。
+用默认等待条件（idle/done/blocked 任一返回），不要指定 `--until done`，否则会漏掉直接回到 idle 的 worker。按返回状态处理：idle/done → 读取同目录 [`REVIEW.md`](REVIEW.md) 执行审查与结论；blocked → 第 6 节；超时 → `agent read` 看一次，正常工作就再等，卡死见第 6 节。
 
-**审查**（每个任务必须做，每轮一次调用取齐证据）：
-
-```bash
-cd .loop/wt/w1; LOG=<主仓库绝对路径>/.loop/logs/tNN-rK.log; mkdir -p "$(dirname "$LOG")"
-echo "== RESULT =="; cat RESULT.md
-git add -A                                         # 暂存含新增的未跟踪文件
-echo "== STATUS =="; git status --short           # 逐个看新增/删除文件：是否越界、有无截图/日志/产物/密钥
-echo "== STAT ==";   git diff --cached --stat <基线>
-echo "== ACCEPT =="; <验收命令> > "$LOG" 2>&1; rc=$?; echo "exit=$rc"; if [ $rc -ne 0 ]; then tail -n 30 "$LOG"; fi
-```
-
-- `<基线>`：首轮 = 派活前主分支提交；返工轮 = 上一轮的检查点提交。worker 不提交，所以不能用 `HEAD` 比较，要用 `git add -A` 后的 `git diff --cached <基线>` 读 diff（首轮全量，返工只看增量）。
-- 核对：①验收退出码为 0（你亲自重跑，同轮不重跑第二遍）②只改了允许范围 ③任务目标逐条做到 ④无明显 bug、边界情况和风格问题 ⑤RESULT.md 的自查与遗留问题和你看到的相符，不符就在 STATE.md 备注该 worker 不可靠。
-- 结论写入 `.loop/reviews/tNN-rK.md`，一两行即可，通过也写。
-
-**结论**：
-
-- **通过**：一次调用串起来，任一步失败即停：
-
-  ```bash
-  git -C .loop/wt/w1 add -A && git -C .loop/wt/w1 commit -qm "<tNN 标题>" \
-  && git merge --no-ff -q -m "<tNN 标题>" loop/w1 \
-  && git status --short && git show --stat --oneline HEAD \
-  && git -C .loop/wt/w1 merge -q <主分支>
-  ```
-
-  合并后核对：工作区干净无冲突标记；`show --stat` 的文件与审查时一致，没多没少。**不再重跑该任务的验收**，除非出现冲突或带入了审查时没见过的改动。然后更新 STATE.md，取下一个任务。
-- **需修改**：写意见到 `.loop/reviews/tNN-rK.md`；**先打检查点** `git -C .loop/wt/w1 add -A && git -C .loop/wt/w1 commit -qm "checkpoint tNN rK"`，哈希记入 STATE.md 作为下一轮基线；再派活。**同一任务最多 3 轮。**
-- **接管**：仅当 3 轮仍不过。先确认任务描述是否够具体；接管后在 STATE.md 备注原因，用于改进后续任务说明。不得因为“自己做更快”而跳过派活。
-- **合并冲突**：自己解决，解决不了见第 7 节。
+**审查与结论**：读取同目录 [`REVIEW.md`](REVIEW.md)，按其中步骤执行。
 
 ## 6. worker 异常
 
@@ -143,12 +92,7 @@ echo "== ACCEPT =="; <验收命令> > "$LOG" 2>&1; rc=$?; echo "exit=$rc"; if [ 
 
 ## 7. 最终验收与停止
 
-**最终验收**（完整模式；轻量模式只对照计划简单过一遍，几行说明每条是否完成）：
-
-1. 主分支上全量跑一次测试/构建/lint，**这是全程唯一一次全量验证**，不逐个重跑任务级验收。
-2. 对照 plan 逐条核对，写入 `.loop/FINAL_CHECK.md`：每条对应任务、证据。证据**优先引用已有审查记录和全量验证结果**，不重读所有代码，仅对有疑点的条目抽查。没有证据的条目视为未完成。
-3. 有缺口 → 追加任务回到第 5 节，最多追加 2 轮，之后仍有缺口就停下汇报。
-4. 全部达成 → 清理 worktree，向用户简短总结。
+最终验收读取同目录 [`REVIEW.md`](REVIEW.md)，按其中步骤执行。
 
 **只有这些情况才停下找用户**，先写 `.loop/BLOCKED.md`（原因、已尝试、建议）：
 

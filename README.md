@@ -9,7 +9,7 @@
 | [`vibecoding-review`](./vibecoding-review/) | 审查当前任务中的 AI 代码改动，核对用户需求覆盖、正确性、运行风险、复杂度与测试证据 | `SKILL.md`、Codex UI 元数据 |
 | [`project-to-act`](./project-to-act/) | 为跨会话、长期项目维护目标、范围、进度、版本、功能和验收证据 | `SKILL.md`、初始化/迁移/验证脚本、五份项目账本模板、Codex UI 元数据 |
 | [`project-state`](./project-state/) | 在新的 Codex 任务之间恢复紧凑、经过验证且与 Git worktree 绑定的项目状态 | Skill、生命周期 Hooks、JSON schemas、状态引擎、测试 |
-| [`loop`](./loop/) | 使用 HerdR 规划任务、指挥执行者、独立验收并合并成果 | 编排者 `SKILL.md` |
+| [`loop`](./loop/) | 使用 HerdR 规划任务、指挥执行者、独立验收并合并成果 | 编排者 `SKILL.md`、`PLAN.md`、`REVIEW.md` |
 | [`loop-worker`](./loop-worker/) | 在独立 worktree 中执行 loop 指派的单项任务并交付结果 | 执行者 `SKILL.md` |
 
 ## 安装
