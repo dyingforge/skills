@@ -14,7 +14,7 @@ description: Use when the user explicitly asks to use loop or HerdR to coordinat
 ## 铁律
 
 1. **不提前结束回合。** 除非全部完成，或触发第 7 节停止条件，否则一直循环，不要汇报进度后停下。
-2. **你不实现。** 写代码、改文档、构建、改配置一律交给 worker。你只做：规划、审查、合并、[`REVIEW.md`](REVIEW.md) 中规定的接管。
+2. **你不实现，worker 不验证。** 写代码、改文档、改配置交给 worker；worker 不 build、不 test、不 typecheck、不 lint，验收、测试、构建全由你亲自运行。你只做：规划、审查、合并、[`REVIEW.md`](REVIEW.md) 中规定的接管。
 3. **不信 worker 自述，独立验收**，每轮只验一次。
 4. **大内容走文件。** 发给 worker 的消息只写“读哪个文件、做什么”。
 5. **不确定的 herdr 命令先 `herdr <group> --help`，不要猜。**
@@ -69,7 +69,7 @@ herdr agent start worker1 --kind codex --pane <pane> -- -m <弱模型> <免确�
 **派活**（只放指针）：
 
 ```bash
-herdr agent prompt worker1 "先读 <绝对路径>/.loop/WORKER.md，再严格执行 <绝对路径>/.loop/tasks/t01.md，完成后自查并写 RESULT.md。"
+herdr agent prompt worker1 "先读 <绝对路径>/.loop/WORKER.md，再严格执行 <绝对路径>/.loop/tasks/t01.md，完成后 git commit 并写 RESULT.md。"
 ```
 
 返工时附上 `.loop/reviews/tNN-rK.md`，说明“逐条解决审查意见”。不要对 agent 用 `pane run` 发指令。
